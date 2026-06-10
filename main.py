@@ -4,34 +4,166 @@ import random
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from data_manager import DataManager
-from spaced_repetition import SpacedRepetition
-from achievements import AchievementSystem
 
-# ====== توکن (از environment variable خونده میشه) ======
 TOKEN = os.environ.get("BOT_TOKEN", "8676945196:AAGw74FdxYTu6CtB3pzv4IDLRvMH_nkItCQ")
 
-# ====== سیستم‌ها ======
+# ====== DataManager ======
+class DataManager:
+    def __init__(self):
+        self.data_dir = "data"
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir)
+        self.users_file = f"{self.data_dir}/users.json"
+        self.users = self.load_users()
+    
+    def load_users(self):
+        if os.path.exists(self.users_file):
+            with open(self.users_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+    
+    def save_users(self):
+        with open(self.users_file, "w", encoding="utf-8") as f:
+            json.dump(self.users, f, ensure_ascii=False, indent=2)
+    
+    def get_user(self, user_id):
+        user_id = str(user_id)
+        if user_id not in self.users:
+            self.users[user_id] = {
+                "level": "a1", "words_learned": {}, "sentences_learned": [],
+                "daily_words": 0, "daily_sentences": 0, "last_reset": str(datetime.now().date()),
+                "score": 0, "streak": 0, "last_active": str(datetime.now().date()),
+                "achievements": [], "weak_words": [], "joined_date": str(datetime.now().date())
+            }
+            self.save_users()
+        return self.users[user_id]
+    
+    def update_user(self, user_id, data):
+        self.users[str(user_id)] = data
+        self.save_users()
+    
+    def load_words(self, level):
+        try:
+            with open(f"{self.data_dir}/words_{level}.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return []
+    
+    def load_sentences(self, level):
+        try:
+            with open(f"{self.data_dir}/sentences_{level}.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return []
+    
+    def get_all_words_count(self):
+        count = 0
+        for level in ["a1", "a2", "b1", "b2", "c1", "c2"]:
+            count += len(self.load_words(level))
+        return count
+    
+    def get_all_sentences_count(self):
+        count = 0
+        for level in ["a1", "a2", "b1", "b2", "c1", "c2"]:
+            count += len(self.load_sentences(level))
+        return count
+
+# ====== SpacedRepetition ======
+class SpacedRepetition:
+    INTERVALS = [1, 3, 7, 14, 30]
+    
+    def __init__(self):
+        self.review_data = {}
+    
+    def add_word(self, user_id, word):
+        user_id = str(user_id)
+        if user_id not in self.review_data:
+            self.review_data[user_id] = {}
+        self.review_data[user_id][word] = {
+            "level": 0, "next_review": str(datetime.now().date() + timedelta(days=1)),
+            "correct_count": 0, "wrong_count": 0, "last_reviewed": str(datetime.now().date())
+        }
+    
+    def get_words_for_review(self, user_id):
+        user_id = str(user_id)
+        today = str(datetime.now().date())
+        review_words = []
+        if user_id in self.review_data:
+            for word, data in self.review_data[user_id].items():
+                if data["next_review"] <= today:
+                    review_words.append(word)
+        return review_words
+    
+    def update_word(self, user_id, word, was_correct):
+        user_id = str(user_id)
+        if user_id in self.review_data and word in self.review_data[user_id]:
+            data = self.review_data[user_id][word]
+            if was_correct:
+                data["correct_count"] += 1
+                if data["level"] < len(self.INTERVALS) - 1:
+                    data["level"] += 1
+            else:
+                data["wrong_count"] += 1
+                data["level"] = 0
+            data["last_reviewed"] = str(datetime.now().date())
+            data["next_review"] = str(datetime.now().date() + timedelta(days=self.INTERVALS[data["level"]]))
+    
+    def get_stats(self, user_id):
+        user_id = str(user_id)
+        if user_id not in self.review_data:
+            return {"total": 0, "mastered": 0, "learning": 0}
+        total = len(self.review_data[user_id])
+        mastered = sum(1 for d in self.review_data[user_id].values() if d["level"] >= 4)
+        return {"total": total, "mastered": mastered, "learning": total - mastered}
+
+# ====== AchievementSystem ======
+class AchievementSystem:
+    ACHIEVEMENTS = {
+        "first_word": {"name": "🌱 اولین قدم", "desc": "اولین لغت رو یاد گرفتی!", "icon": "🌱"},
+        "10_words": {"name": "📚 کتاب‌خوان", "desc": "۱۰ لغت یاد گرفتی!", "icon": "📚"},
+        "50_words": {"name": "📖 دانشجو", "desc": "۵۰ لغت یاد گرفتی!", "icon": "📖"},
+        "100_words": {"name": "🎓 دانش‌آموخته", "desc": "۱۰۰ لغت یاد گرفتی!", "icon": "🎓"},
+        "500_words": {"name": "🧠 نابغه", "desc": "۵۰۰ لغت یاد گرفتی!", "icon": "🧠"},
+        "1000_words": {"name": "👑 استاد", "desc": "۱۰۰۰ لغت یاد گرفتی!", "icon": "👑"},
+        "streak_3": {"name": "🔥 ۳ روز", "desc": "۳ روز پشت سر هم مطالعه کردی!", "icon": "🔥"},
+        "streak_7": {"name": "💪 ۷ روز", "desc": "یک هفته کامل مطالعه کردی!", "icon": "💪"},
+        "streak_30": {"name": "⭐ ۳۰ روز", "desc": "یک ماه کامل مطالعه کردی!", "icon": "⭐"},
+    }
+    
+    def check_achievements(self, user_data):
+        new_achievements = []
+        user_achievements = user_data.get("achievements", [])
+        words_count = len(user_data.get("words_learned", {}))
+        streak = user_data.get("streak", 0)
+        
+        word_milestones = {"first_word": 1, "10_words": 10, "50_words": 50, "100_words": 100, "500_words": 500, "1000_words": 1000}
+        for key, count in word_milestones.items():
+            if words_count >= count and key not in user_achievements:
+                new_achievements.append(key)
+        
+        streak_milestones = {"streak_3": 3, "streak_7": 7, "streak_30": 30}
+        for key, count in streak_milestones.items():
+            if streak >= count and key not in user_achievements:
+                new_achievements.append(key)
+        
+        return new_achievements
+    
+    def get_achievement_info(self, key):
+        return self.ACHIEVEMENTS.get(key, {"name": key, "desc": "", "icon": "❓"})
+
+# ====== مقداردهی اولیه ======
 dm = DataManager()
 sr = SpacedRepetition()
 ach = AchievementSystem()
 
-# ====== سطوح ======
 LEVELS = {
-    "a1": {"name": "🟢 A1 - مبتدی", "words_per_day": 10, "sentences_per_day": 5},
-    "a2": {"name": "🟡 A2 - پایه", "words_per_day": 10, "sentences_per_day": 5},
-    "b1": {"name": "🟠 B1 - متوسط", "words_per_day": 10, "sentences_per_day": 5},
-    "b2": {"name": "🔵 B2 - متوسط رو به بالا", "words_per_day": 10, "sentences_per_day": 5},
-    "c1": {"name": "🟣 C1 - پیشرفته", "words_per_day": 10, "sentences_per_day": 5},
-    "c2": {"name": "🔴 C2 - تسلط کامل", "words_per_day": 10, "sentences_per_day": 5}
+    "a1": {"name": "🟢 A1 - مبتدی"}, "a2": {"name": "🟡 A2 - پایه"},
+    "b1": {"name": "🟠 B1 - متوسط"}, "b2": {"name": "🔵 B2 - متوسط رو به بالا"},
+    "c1": {"name": "🟣 C1 - پیشرفته"}, "c2": {"name": "🔴 C2 - تسلط کامل"}
 }
 
-# ====== توابع کمکی ======
-def get_user(user_id):
-    return dm.get_user(user_id)
-
-def save_user(user_id, data):
-    dm.update_user(user_id, data)
+def get_user(user_id): return dm.get_user(user_id)
+def save_user(user_id, data): dm.update_user(user_id, data)
 
 def reset_daily(user_id):
     user = get_user(user_id)
@@ -39,67 +171,29 @@ def reset_daily(user_id):
     if user.get("last_reset") != today:
         last_active = datetime.strptime(user.get("last_active", today), "%Y-%m-%d").date()
         yesterday = datetime.now().date() - timedelta(days=1)
-        
-        if last_active == yesterday:
-            user["streak"] = user.get("streak", 0) + 1
-        elif last_active < yesterday:
-            user["streak"] = 0
-        
-        user["daily_words"] = 0
-        user["daily_sentences"] = 0
-        user["last_reset"] = today
-        user["last_active"] = today
+        if last_active == yesterday: user["streak"] = user.get("streak", 0) + 1
+        elif last_active < yesterday: user["streak"] = 0
+        user["daily_words"] = 0; user["daily_sentences"] = 0
+        user["last_reset"] = today; user["last_active"] = today
         save_user(user_id, user)
     return user
 
 def get_unlearned_words(user_id, count=10):
     user = get_user(user_id)
-    level = user["level"]
-    all_words = dm.load_words(level)
+    all_words = dm.load_words(user["level"])
     learned = set(user.get("words_learned", {}).keys())
     available = [w for w in all_words if w["word"] not in learned]
-    
-    if len(available) < count:
-        available = all_words
-    
-    if not available:
-        return []
-    
-    return random.sample(available, min(count, len(available)))
+    if len(available) < count: available = all_words
+    return random.sample(available, min(count, len(available))) if available else []
 
 def get_unlearned_sentences(user_id, count=5):
     user = get_user(user_id)
-    level = user["level"]
-    all_sentences = dm.load_sentences(level)
+    all_sentences = dm.load_sentences(user["level"])
     learned = set(user.get("sentences_learned", []))
     available = [s for s in all_sentences if s["english"] not in learned]
-    
-    if len(available) < count:
-        available = all_sentences
-    
-    if not available:
-        return []
-    
-    return random.sample(available, min(count, len(available)))
+    if len(available) < count: available = all_sentences
+    return random.sample(available, min(count, len(available))) if available else []
 
-def get_review_words(user_id, count=5):
-    review_list = sr.get_words_for_review(user_id)
-    if len(review_list) > count:
-        review_list = random.sample(review_list, count)
-    
-    user = get_user(user_id)
-    level = user["level"]
-    all_words = dm.load_words(level)
-    
-    result = []
-    for word in review_list:
-        word_info = next((w for w in all_words if w["word"] == word), None)
-        if word_info:
-            result.append(word_info)
-    
-    return result
-
-# ====== منوها ======
 def build_main_menu():
     keyboard = [
         [InlineKeyboardButton("📚 لغات امروز (۱۰ عدد)", callback_data="daily_words")],
@@ -118,195 +212,131 @@ def build_quiz_menu():
         [InlineKeyboardButton("📖 معنی کلمه", callback_data="quiz_word")],
         [InlineKeyboardButton("📝 کامل کردن جمله", callback_data="quiz_sentence")],
         [InlineKeyboardButton("🔄 ترجمه جمله", callback_data="quiz_translate")],
-        [InlineKeyboardButton("🎯 تطبیق کلمه", callback_data="quiz_match")],
         [InlineKeyboardButton("🔙 برگشت", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def build_level_menu():
-    keyboard = []
-    for lk, ld in LEVELS.items():
-        keyboard.append([InlineKeyboardButton(ld["name"], callback_data=f"setlevel_{lk}")])
+    keyboard = [[InlineKeyboardButton(ld["name"], callback_data=f"setlevel_{lk}")] for lk, ld in LEVELS.items()]
     keyboard.append([InlineKeyboardButton("🔙 برگشت", callback_data="settings_menu")])
     return InlineKeyboardMarkup(keyboard)
 
-def build_settings_menu():
-    keyboard = [
-        [InlineKeyboardButton("⚙️ تغییر سطح", callback_data="change_level")],
-        [InlineKeyboardButton("📊 آمار کامل", callback_data="full_stats")],
-        [InlineKeyboardButton("🔄 ریست پیشرفت", callback_data="reset_progress")],
-        [InlineKeyboardButton("🔙 برگشت", callback_data="main_menu")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# ====== Handlerها ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = str(user.id)
-    
+    user_id = str(update.effective_user.id)
     user_data = get_user(user_id)
-    level = user_data.get("level", "a1")
-    streak = user_data.get("streak", 0)
-    total_words = len(user_data.get("words_learned", {}))
-    total_sentences = len(user_data.get("sentences_learned", []))
-    
     welcome = f"""
-🎓 **به ربات جامع آموزش زبان انگلیسی خوش اومدی {user.first_name}!**
+🎓 **به ربات جامع آموزش زبان انگلیسی خوش اومدی!**
 
-🔥 **استریک فعلی:** {streak} روز
-📚 **لغات یادگرفته:** {total_words}
-📝 **جملات یادگرفته:** {total_sentences}
-🎯 **سطح:** {LEVELS[level]['name']}
+🔥 استریک: {user_data.get('streak', 0)} روز
+📚 لغات: {len(user_data.get('words_learned', {}))}
+🎯 سطح: {LEVELS[user_data.get('level', 'a1')]['name']}
 
-✨ **امکانات پیشرفته:**
-• 📚 ۱۰ لغت جدید روزانه با مثال
-• 📝 ۵ جمله کاربردی با ترجمه
-• 🔄 مرور هوشمند (Spaced Repetition)
-• 🎯 ۴ نوع تمرین مختلف
-• 🏆 سیستم نشان‌های افتخار
-• 📊 نمودار پیشرفت
-• 🔥 پیگیری استریک روزانه
-
-🎮 شروع کن 👇
+📖 **{dm.get_all_words_count()}+ لغت** | 📝 **{dm.get_all_sentences_count()}+ جمله**
 """
     await update.message.reply_text(welcome, reply_markup=build_main_menu())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     user_id = str(query.from_user.id)
     data = query.data
     
     if data == "main_menu":
-        await query.edit_message_text("🎮 **منوی اصلی:**", reply_markup=build_main_menu())
+        await query.edit_message_text("🎮 منوی اصلی:", reply_markup=build_main_menu())
     
     elif data == "daily_words":
         user = reset_daily(user_id)
         words = get_unlearned_words(user_id, 10)
-        
         if not words:
             await query.edit_message_text("⚠️ لغتی موجود نیست.", reply_markup=build_main_menu())
             return
         
-        response = f"📚 **لغات امروز - {LEVELS[user['level']]['name']}**\n\n"
-        words_learned = user.get("words_learned", {})
-        
+        response = f"📚 **لغات امروز**\n\n"
+        wl = user.get("words_learned", {})
         for i, w in enumerate(words, 1):
-            response += f"**{i}. {w['word']}** = {w['meaning']}\n"
-            response += f"   📖 {w.get('example', '')}\n"
-            response += f"   🔄 {w.get('translation', '')}\n\n"
-            words_learned[w["word"]] = str(datetime.now().date())
+            response += f"**{i}. {w['word']}** = {w['meaning']}\n   📖 {w.get('example','')}\n\n"
+            wl[w["word"]] = str(datetime.now().date())
             sr.add_word(user_id, w["word"])
         
-        user["words_learned"] = words_learned
+        user["words_learned"] = wl
         user["daily_words"] = user.get("daily_words", 0) + len(words)
         user["score"] = user.get("score", 0) + len(words) * 2
         
         new_ach = ach.check_achievements(user)
-        if new_ach:
-            for a in new_ach:
-                a_info = ach.get_achievement_info(a)
-                user["achievements"] = user.get("achievements", []) + [a]
-                response += f"\n🎉 **نشان جدید:** {a_info['icon']} {a_info['name']}!"
+        for a in new_ach:
+            user["achievements"] = user.get("achievements", []) + [a]
+            response += f"🎉 نشان: {ach.get_achievement_info(a)['icon']} {ach.get_achievement_info(a)['name']}\n"
         
         save_user(user_id, user)
-        
-        response += f"\n✅ {len(words)} لغت اضافه شد | ⭐ +{len(words)*2} امتیاز"
-        response += f"\n📊 امروز: {user['daily_words']}/10 | 🔥 استریک: {user.get('streak', 0)} روز"
-        
+        response += f"\n✅ {len(words)} لغت | ⭐ +{len(words)*2}"
         await query.edit_message_text(response, reply_markup=build_main_menu())
     
     elif data == "daily_sentences":
         user = reset_daily(user_id)
         sentences = get_unlearned_sentences(user_id, 5)
-        
         if not sentences:
-            await query.edit_message_text("⚠️ جمله‌ای موجود نیست.", reply_markup=build_main_menu())
+            await query.edit_message_text("⚠️ جمله‌ای نیست.", reply_markup=build_main_menu())
             return
         
-        response = f"📝 **جملات امروز - {LEVELS[user['level']]['name']}**\n\n"
-        sent_learned = user.get("sentences_learned", [])
-        
+        response = f"📝 **جملات امروز**\n\n"
+        sl = user.get("sentences_learned", [])
         for i, s in enumerate(sentences, 1):
-            response += f"**{i}.** {s['english']}\n"
-            response += f"   🔄 {s['persian']}\n"
-            if s.get('grammar'):
-                response += f"   📚 {s['grammar']}\n"
-            response += "\n"
-            sent_learned.append(s["english"])
+            response += f"**{i}.** {s['english']}\n   🔄 {s['persian']}\n\n"
+            sl.append(s["english"])
         
-        user["sentences_learned"] = sent_learned
+        user["sentences_learned"] = sl
         user["daily_sentences"] = user.get("daily_sentences", 0) + len(sentences)
         user["score"] = user.get("score", 0) + len(sentences) * 3
         save_user(user_id, user)
-        
-        response += f"✅ {len(sentences)} جمله اضافه شد | ⭐ +{len(sentences)*3} امتیاز"
-        
+        response += f"✅ {len(sentences)} جمله | ⭐ +{len(sentences)*3}"
         await query.edit_message_text(response, reply_markup=build_main_menu())
     
     elif data == "smart_review":
-        user = get_user(user_id)
-        review_words = get_review_words(user_id, 5)
-        
+        review_words = sr.get_words_for_review(user_id)
         if not review_words:
-            await query.edit_message_text(
-                "🎉 هیچ کلمه‌ای برای مرور امروز نداری!\nهمه لغات رو خوب بلدی! 👏",
-                reply_markup=build_main_menu()
-            )
+            await query.edit_message_text("🎉 همه لغات رو بلدی!", reply_markup=build_main_menu())
             return
-        
-        response = "🔄 **مرور هوشمند امروز**\n\n"
-        for i, w in enumerate(review_words, 1):
-            response += f"**{i}. {w['word']}**\n"
-            response += f"   معنی: {w['meaning']}\n"
-            response += f"   مثال: {w.get('example', '')}\n\n"
-        
-        stats = sr.get_stats(user_id)
-        response += f"\n📊 آمار مرور: {stats['mastered']} مسلط | {stats['learning']} در حال یادگیری"
-        
-        await query.edit_message_text(response, reply_markup=build_main_menu())
+        await query.edit_message_text(f"🔄 **{len(review_words)} کلمه برای مرور داری!**\nبرو به بخش لغات.", reply_markup=build_main_menu())
     
     elif data == "quiz_menu":
-        await query.edit_message_text("🎯 **انتخاب نوع تمرین:**", reply_markup=build_quiz_menu())
+        await query.edit_message_text("🎯 انتخاب کن:", reply_markup=build_quiz_menu())
     
     elif data == "quiz_word":
         user = get_user(user_id)
-        level = user["level"]
-        words = dm.load_words(level)
-        
+        words = dm.load_words(user["level"])
         if len(words) < 4:
             await query.edit_message_text("⚠️ لغات کافی نیست.", reply_markup=build_main_menu())
             return
-        
         word = random.choice(words)
         options = [word["meaning"]]
         others = [w for w in words if w["word"] != word["word"]]
         options.extend(random.sample([w["meaning"] for w in others], min(3, len(others))))
         random.shuffle(options)
-        
-        context.user_data["quiz_answer"] = word["meaning"]
-        context.user_data["quiz_word"] = word["word"]
-        
-        keyboard = []
-        for opt in options:
-            keyboard.append([InlineKeyboardButton(opt, callback_data=f"ans_{opt[:20]}")])
+        context.user_data["answer"] = word["meaning"]
+        keyboard = [[InlineKeyboardButton(o, callback_data=f"ans_{o[:20]}")] for o in options]
         keyboard.append([InlineKeyboardButton("🔙 برگشت", callback_data="quiz_menu")])
-        
-        response = f"🎯 **معنی این کلمه چیه؟**\n\n📖 **{word['word']}**"
-        await query.edit_message_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"🎯 معنی **{word['word']}** چیه؟", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    elif data.startswith("ans_"):
+        user_answer = data.replace("ans_", "")
+        correct = context.user_data.get("answer", "")
+        user = get_user(user_id)
+        if user_answer == correct:
+            user["score"] = user.get("score", 0) + 5
+            response = f"✅ آفرین! ⭐ +5"
+        else:
+            response = f"❌ جواب: {correct}"
+        save_user(user_id, user)
+        await query.edit_message_text(response, reply_markup=build_main_menu())
     
     elif data == "quiz_sentence":
         user = get_user(user_id)
-        level = user["level"]
-        sentences = dm.load_sentences(level)
-        
+        sentences = dm.load_sentences(user["level"])
         if len(sentences) < 2:
             await query.edit_message_text("⚠️ جملات کافی نیست.", reply_markup=build_main_menu())
             return
-        
-        sentence = random.choice(sentences)
-        words_in = sentence["english"].split()
+        s = random.choice(sentences)
+        words_in = s["english"].split()
         if len(words_in) > 3:
             idx = random.randint(0, len(words_in)-1)
             missing = words_in[idx]
@@ -315,247 +345,88 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             missing = words_in[-1]
             incomplete = " ".join(words_in[:-1]) + " _____"
-        
-        context.user_data["quiz_answer"] = missing
-        context.user_data["quiz_sentence"] = sentence["english"]
-        
-        keyboard = [
-            [InlineKeyboardButton("🔍 جواب", callback_data="show_answer")],
-            [InlineKeyboardButton("🔙 برگشت", callback_data="quiz_menu")]
-        ]
-        
-        response = f"📝 **جمله رو کامل کن:**\n\n{incomplete}\n\n🔄 {sentence['persian']}"
-        await query.edit_message_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
+        context.user_data["answer"] = missing
+        keyboard = [[InlineKeyboardButton("🔍 جواب", callback_data="show_ans")], [InlineKeyboardButton("🔙 برگشت", callback_data="quiz_menu")]]
+        await query.edit_message_text(f"📝 کامل کن:\n{incomplete}\n🔄 {s['persian']}", reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "quiz_translate":
         user = get_user(user_id)
-        level = user["level"]
-        sentences = dm.load_sentences(level)
-        
+        sentences = dm.load_sentences(user["level"])
         if not sentences:
             await query.edit_message_text("⚠️ جملات کافی نیست.", reply_markup=build_main_menu())
             return
-        
-        sentence = random.choice(sentences)
-        context.user_data["quiz_answer"] = sentence["english"]
-        
-        keyboard = [
-            [InlineKeyboardButton("🔍 جواب", callback_data="show_answer")],
-            [InlineKeyboardButton("🔙 برگشت", callback_data="quiz_menu")]
-        ]
-        
-        response = f"🔄 **ترجمه کن به انگلیسی:**\n\n📝 {sentence['persian']}"
-        await query.edit_message_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
+        s = random.choice(sentences)
+        context.user_data["answer"] = s["english"]
+        keyboard = [[InlineKeyboardButton("🔍 جواب", callback_data="show_ans")], [InlineKeyboardButton("🔙 برگشت", callback_data="quiz_menu")]]
+        await query.edit_message_text(f"🔄 ترجمه کن:\n📝 {s['persian']}", reply_markup=InlineKeyboardMarkup(keyboard))
     
-    elif data == "quiz_match":
-        user = get_user(user_id)
-        level = user["level"]
-        words = dm.load_words(level)
-        
-        if len(words) < 3:
-            await query.edit_message_text("⚠️ لغات کافی نیست.", reply_markup=build_main_menu())
-            return
-        
-        match_words = random.sample(words, min(3, len(words)))
-        
-        response = "🎯 **کلمه رو به معنی وصل کن:**\n\n"
-        for i, w in enumerate(match_words, 1):
-            response += f"{i}. {w['word']}\n"
-        response += "\n"
-        meanings = [w["meaning"] for w in match_words]
-        random.shuffle(meanings)
-        for j, m in enumerate(meanings, 1):
-            response += f"{chr(64+j)}) {m}\n"
-        
-        response += "\n✍️ جواب رو تو پیام بعدی بگو! (مثال: 1a, 2b, 3c)"
-        
-        await query.edit_message_text(response, reply_markup=build_main_menu())
-    
-    elif data == "show_answer":
-        answer = context.user_data.get("quiz_answer", "")
-        
-        if "quiz_sentence" in context.user_data:
-            full = context.user_data.get("quiz_sentence", "")
-            response = f"✅ **جواب:** {answer}\n📝 جمله: {full}"
-        else:
-            response = f"✅ **ترجمه:** {answer}"
-        
-        response += "\n\n⭐ +2 امتیاز"
+    elif data == "show_ans":
+        answer = context.user_data.get("answer", "")
         user = get_user(user_id)
         user["score"] = user.get("score", 0) + 2
-        
-        new_ach = ach.check_achievements(user)
-        if new_ach:
-            for a in new_ach:
-                a_info = ach.get_achievement_info(a)
-                user["achievements"] = user.get("achievements", []) + [a]
-                response += f"\n🎉 نشان: {a_info['icon']} {a_info['name']}"
-        
         save_user(user_id, user)
-        await query.edit_message_text(response, reply_markup=build_main_menu())
-    
-    elif data.startswith("ans_"):
-        user_answer = data.replace("ans_", "")
-        correct = context.user_data.get("quiz_answer", "")
-        
-        user = get_user(user_id)
-        
-        if user_answer == correct:
-            user["score"] = user.get("score", 0) + 5
-            response = f"✅ **آفرین!** 🎉\n\n⭐ +5 امتیاز\n🏆 کل: {user['score']}"
-            sr.update_word(user_id, context.user_data.get("quiz_word", ""), True)
-        else:
-            response = f"❌ **اشتباه**\n✅ درست: {correct}"
-            sr.update_word(user_id, context.user_data.get("quiz_word", ""), False)
-            weak = user.get("weak_words", [])
-            if context.user_data.get("quiz_word") not in weak:
-                weak.append(context.user_data.get("quiz_word"))
-            user["weak_words"] = weak
-        
-        save_user(user_id, user)
-        await query.edit_message_text(response, reply_markup=build_main_menu())
+        await query.edit_message_text(f"✅ {answer}\n⭐ +2", reply_markup=build_main_menu())
     
     elif data == "progress":
         user = get_user(user_id)
-        level = user["level"]
-        words_count = len(user.get("words_learned", {}))
-        sent_count = len(user.get("sentences_learned", []))
-        weak_count = len(user.get("weak_words", []))
-        ach_count = len(user.get("achievements", []))
-        sr_stats = sr.get_stats(user_id)
-        
-        response = f"""
-📊 **گزارش پیشرفت**
-
-🎯 سطح: {LEVELS[level]['name']}
-📚 لغات: {words_count} (مسلط: {sr_stats['mastered']})
-📝 جملات: {sent_count}
-⚠️ لغات ضعیف: {weak_count}
-🏆 نشان‌ها: {ach_count}
+        response = f"""📊 **پیشرفت**
+🎯 سطح: {LEVELS[user['level']]['name']}
+📚 لغات: {len(user.get('words_learned', {}))}
+📝 جملات: {len(user.get('sentences_learned', []))}
 ⭐ امتیاز: {user.get('score', 0)}
 🔥 استریک: {user.get('streak', 0)} روز
-📅 لغات امروز: {user.get('daily_words', 0)}/10
-📅 جملات امروز: {user.get('daily_sentences', 0)}/5
 """
         await query.edit_message_text(response, reply_markup=build_main_menu())
     
     elif data == "achievements":
         user = get_user(user_id)
-        user_ach = user.get("achievements", [])
-        
-        response = "🏆 **نشان‌های شما**\n\n"
-        
-        all_ach = ach.ACHIEVEMENTS
-        earned = 0
-        for key, info in all_ach.items():
-            status = "✅" if key in user_ach else "🔒"
-            response += f"{info['icon']} {status} {info['name']}: {info['desc']}\n"
-            if key in user_ach:
-                earned += 1
-        
-        response += f"\n🎖️ {earned}/{len(all_ach)} نشان دریافت شده"
-        
+        ua = user.get("achievements", [])
+        response = "🏆 **نشان‌ها**\n\n"
+        for k, v in ach.ACHIEVEMENTS.items():
+            response += f"{v['icon']} {'✅' if k in ua else '🔒'} {v['name']}\n"
         await query.edit_message_text(response, reply_markup=build_main_menu())
     
     elif data == "daily_report":
         user = get_user(user_id)
-        today = str(datetime.now().date())
-        words_today = user.get("daily_words", 0)
-        sent_today = user.get("daily_sentences", 0)
-        
-        if user.get("last_reset") != today:
-            words_today = 0
-            sent_today = 0
-        
-        remaining_words = 10 - words_today
-        remaining_sent = 5 - sent_today
-        
-        response = f"""
-📋 **گزارش امروز** ({datetime.now().strftime('%Y/%m/%d')})
-
-📚 لغات: {words_today}/10 {"✅ کامل" if words_today >= 10 else f"⏳ {remaining_words} تا باقی‌مونده"}
-📝 جملات: {sent_today}/5 {"✅ کامل" if sent_today >= 5 else f"⏳ {remaining_sent} تا باقی‌مونده"}
-🔥 استریک: {user.get('streak', 0)} روز
-⭐ امتیاز امروز: {words_today * 2 + sent_today * 3}
-
-{"🎉 امروز رو کامل کردی! آفرین!" if words_today >= 10 and sent_today >= 5 else "💪 ادامه بده، هنوز تموم نشده!"}
-"""
+        w = user.get("daily_words", 0)
+        s = user.get("daily_sentences", 0)
+        response = f"📋 **گزارش امروز**\n📚 لغات: {w}/10\n📝 جملات: {s}/5\n🔥 استریک: {user.get('streak', 0)}"
         await query.edit_message_text(response, reply_markup=build_main_menu())
     
     elif data == "settings_menu":
-        await query.edit_message_text("⚙️ **تنظیمات:**", reply_markup=build_settings_menu())
+        keyboard = [
+            [InlineKeyboardButton("⚙️ تغییر سطح", callback_data="change_level")],
+            [InlineKeyboardButton("🔄 ریست", callback_data="reset_progress")],
+            [InlineKeyboardButton("🔙 برگشت", callback_data="main_menu")]
+        ]
+        await query.edit_message_text("⚙️ تنظیمات:", reply_markup=InlineKeyboardMarkup(keyboard))
     
     elif data == "change_level":
-        await query.edit_message_text("🎯 **سطح جدید رو انتخاب کن:**", reply_markup=build_level_menu())
+        await query.edit_message_text("🎯 سطح:", reply_markup=build_level_menu())
     
     elif data.startswith("setlevel_"):
         level = data.replace("setlevel_", "")
         user = get_user(user_id)
         user["level"] = level
-        user["words_learned"] = {}
-        user["sentences_learned"] = []
-        user["daily_words"] = 0
-        user["daily_sentences"] = 0
-        user["weak_words"] = []
         save_user(user_id, user)
-        
-        await query.edit_message_text(
-            f"✅ سطح به **{LEVELS[level]['name']}** تغییر کرد!",
-            reply_markup=build_main_menu()
-        )
-    
-    elif data == "full_stats":
-        user = get_user(user_id)
-        level = user["level"]
-        
-        response = f"""
-📊 **آمار کامل**
-
-🎯 سطح: {LEVELS[level]['name']}
-📚 کل لغات: {len(user.get('words_learned', {}))}
-📝 کل جملات: {len(user.get('sentences_learned', []))}
-⚠️ لغات ضعیف: {len(user.get('weak_words', []))}
-🏆 نشان‌ها: {len(user.get('achievements', []))}
-⭐ امتیاز: {user.get('score', 0)}
-🔥 بهترین استریک: {user.get('streak', 0)}
-📖 لغات مسلط: {sr.get_stats(user_id)['mastered']}
-"""
-        await query.edit_message_text(response, reply_markup=build_main_menu())
+        await query.edit_message_text(f"✅ سطح: {LEVELS[level]['name']}", reply_markup=build_main_menu())
     
     elif data == "reset_progress":
-        keyboard = [
-            [InlineKeyboardButton("⚠️ بله، مطمئنم", callback_data="confirm_reset")],
-            [InlineKeyboardButton("🔙 لغو", callback_data="settings_menu")]
-        ]
-        await query.edit_message_text(
-            "⚠️ **هشدار:** با این کار همه پیشرفتت پاک میشه!\nمطمئنی؟",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif data == "confirm_reset":
         user = get_user(user_id)
         user["words_learned"] = {}
         user["sentences_learned"] = []
         user["score"] = 0
-        user["weak_words"] = []
         user["streak"] = 0
-        user["achievements"] = []
         save_user(user_id, user)
-        
-        await query.edit_message_text("🔄 همه چیز ریست شد.", reply_markup=build_main_menu())
+        await query.edit_message_text("🔄 ریست شد!", reply_markup=build_main_menu())
 
-# ====== راه‌اندازی ======
 def main():
-    print("🎓 ربات پیشرفته آموزش زبان انگلیسی")
     print(f"📖 لغات: {dm.get_all_words_count()}")
     print(f"📝 جملات: {dm.get_all_sentences_count()}")
-    print(f"👥 کاربران: {len(dm.users)}")
-    
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
-    print("✅ ربات آماده و در حال اجراست!")
+    print("✅ ربات آماده!")
     app.run_polling(poll_interval=1.0)
 
 if __name__ == "__main__":
